@@ -1,5 +1,4 @@
 include_directories(${KDE4_INCLUDES} ${KDE4_INCLUDE_DIR} ${QT_INCLUDES} ${QIMAGEBLITZ_INCLUDES} ${GPGME_INCLUDES})
-add_subdirectory(tests)
 
 ########### next target ###############
 
@@ -25,6 +24,7 @@ set(basketcommon_LIB_SRCS
     focusedwidgets.cpp
     formatimporter.cpp
     global.cpp
+    gitwrapper.cpp
     htmlexporter.cpp
     history.cpp
     kcolorcombo2.cpp
@@ -51,12 +51,19 @@ set(basketcommon_LIB_SRCS
     xmlwork.cpp
 )
 
+set(PIMO_CPP "") # One of the generated files
+
 IF(HAVE_NEPOMUK)
   include_directories("${CMAKE_CURRENT_SOURCE_DIR}/src" ${NEPOMUK_INCLUDES} ${SOPRANO_INCLUDE_DIR})
   include(SopranoAddOntology)
   soprano_add_ontology(basketcommon_LIB_SRCS ${SHAREDDESKTOPONTOLOGIES_ROOT_DIR}/nie/nie.trig "NIE" "Soprano::Vocabulary" "trig")
   soprano_add_ontology(basketcommon_LIB_SRCS ${SHAREDDESKTOPONTOLOGIES_ROOT_DIR}/nie/nfo.trig "NFO" "Soprano::Vocabulary" "trig")
   soprano_add_ontology(basketcommon_LIB_SRCS ${SHAREDDESKTOPONTOLOGIES_ROOT_DIR}/pimo/pimo.trig "PIMO" "Soprano::Vocabulary" "trig")
+  
+  list(LENGTH basketcommon_LIB_SRCS SRCS_LENGTH)
+  math(EXPR SRCS_LENGTH "${SRCS_LENGTH} - 1")
+  list(GET basketcommon_LIB_SRCS ${SRCS_LENGTH} PIMO_CPP) # PIMO_CPP = last element
+  
   list(INSERT basketcommon_LIB_SRCS 10 nepomukintegration.cpp)
 ENDIF(HAVE_NEPOMUK)
 
@@ -69,7 +76,6 @@ QT4_ADD_RESOURCES(basketcommon_LIB_SRCS ../basket.qrc)
 kde4_add_library(basketcommon SHARED ${basketcommon_LIB_SRCS})
 
 target_link_libraries(basketcommon
-  ${KDE4_KDE3SUPPORT_LIBS} # Remove me
   ${KDE4_KIO_LIBS}
   ${KDE4_KDEUI_LIBS}
   ${KDE4_KPARTS_LIBS}
@@ -91,17 +97,30 @@ set_target_properties(basketcommon PROPERTIES VERSION ${GENERIC_LIB_VERSION} SOV
 
 install(TARGETS basketcommon DESTINATION ${LIB_INSTALL_DIR})
 
+# Add unit tests after all variables have been set.
+# If we save target_link_libraries to a variable, we can reuse it too
+
+# Soprano files must exist, otherwise tests won't build
+set(FILES_GENERATED (EXISTS ${PIMO_CPP}))
+if(${FILES_GENERATED})
+  add_subdirectory(tests)
+endif(${FILES_GENERATED})
+
 ########### next target ###############
 
 set(basket_SRCS main.cpp mainwindow.cpp application.cpp)
 
 kde4_add_executable(basket ${basket_SRCS})
 target_link_libraries(basket
-  ${KDE4_KDE3SUPPORT_LIBS} # Remove me as well
   ${KDE4_KUTILS_LIBS}
   ${KDE4_KFILE_LIBS}
   ${KDE4_PHONON_LIBRARY}
   basketcommon)
+
+IF(LIBGIT2_FOUND)
+  target_link_libraries(basketcommon ${LIBGIT2_LIBRARIES})
+  target_link_libraries(basket ${LIBGIT2_LIBRARIES})
+ENDIF(LIBGIT2_FOUND)
 
 install(TARGETS basket DESTINATION ${BIN_INSTALL_DIR})
 
@@ -111,7 +130,7 @@ set(kcm_basket_PART_SRCS kcm_basket.cpp)
 
 kde4_add_plugin(kcm_basket ${kcm_basket_PART_SRCS})
 
-target_link_libraries(kcm_basket ${QT_QT3SUPPORT_LIBRARY} ${KDE4_KDECORE_LIBS} ${KDE4_KDEUI_LIBS} basketcommon)
+target_link_libraries(kcm_basket ${KDE4_KDECORE_LIBS} ${KDE4_KDEUI_LIBS} basketcommon)
 
 install(TARGETS kcm_basket DESTINATION ${PLUGIN_INSTALL_DIR})
 
@@ -123,7 +142,7 @@ set(basketpart_PART_SRCS basket_part.cpp)
 
 kde4_add_plugin(basketpart WITH_PREFIX ${basketpart_PART_SRCS})
 
-target_link_libraries(basketpart ${KDE4_KPARTS_LIBS} basketcommon kparts kdeui ${QT_QT3SUPPORT_LIBRARY})
+target_link_libraries(basketpart ${KDE4_KPARTS_LIBS} basketcommon kparts kdeui)
 
 install(TARGETS basketpart DESTINATION ${PLUGIN_INSTALL_DIR})
 

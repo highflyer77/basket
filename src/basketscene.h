@@ -209,9 +209,7 @@ private slots:
 
 /// TOOL TIPS:
 protected:
-    bool event(QEvent *event);
-    // TODO: replace with QGraphicsScene::helpEvent()
-    void tooltipEvent(QHelpEvent *event);
+    void helpEvent(QGraphicsSceneHelpEvent* event);
 
 /// ANIMATIONS:
 private:
@@ -237,7 +235,9 @@ private:
     KGpgMe* m_gpg;
 #endif
     QTimer      m_inactivityAutoLockTimer;
+    QTimer      m_commitdelay;
     void enableActions();
+
 
 private slots:
     void loadNotes(const QDomElement &notes, Note *parent);
@@ -250,6 +250,7 @@ public slots:
     void loadProperties(const QDomElement &properties);
     void saveProperties(QDomDocument &document, QDomElement &properties);
     bool save();
+    void commitEdit();
     void reload();
 public:
     bool isEncrypted();
@@ -264,14 +265,11 @@ public:
     bool loadingLaunched() {
         return m_loadingLaunched;
     };
-    bool loadFromFile(const QString &fullPath, QString* string, bool isLocalEncoding = false);
+    bool loadFromFile(const QString &fullPath, QString* string);
     bool loadFromFile(const QString &fullPath, QByteArray* array);
-    bool saveToFile(const QString& fullPath, const QByteArray& array);
-    bool saveToFile(const QString& fullPath, const QByteArray& array, unsigned long length);
-    bool saveToFile(const QString& fullPath, const QString& string, bool isLocalEncoding = false);
-    static bool safelySaveToFile(const QString& fullPath, const QByteArray& array);
+    bool saveToFile(const QString& fullPath, const QString& string);
     static bool safelySaveToFile(const QString& fullPath, const QByteArray& array, unsigned long length);
-    static bool safelySaveToFile(const QString& fullPath, const QString& string, bool isLocalEncoding = false);
+    static bool safelySaveToFile(const QString& fullPath, const QString& string);
     bool setProtection(int type, QString key);
     int  encryptionType()  {
         return m_encryptionType;
@@ -550,7 +548,7 @@ private:
 public slots:
     void placeEditor(bool andEnsureVisible = false);
     void placeEditorAndEnsureVisible();
-    bool closeEditor();
+    bool closeEditor(bool deleteEmptyNote = true);
     void closeEditorDelayed();
     void updateEditorAppearance();
     void editorPropertiesChanged();

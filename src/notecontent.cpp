@@ -36,6 +36,8 @@
 #include <QtGui/QWidget>
 #include <QtXml/QDomDocument>
 #include <QtNetwork/QNetworkReply>
+#include <QTextBlock>
+#include <QTextCodec>
 #include <KDE/KIO/AccessManager>
 
 #include <KDE/KDebug>
@@ -44,6 +46,7 @@
 #include <KDE/KFileMetaInfo>
 #include <KDE/KFileItem>
 #include <KDE/KIO/PreviewJob>                   //For KIO::file_preview(...)
+#include <KDE/KEncodingProber>
 
 #include <phonon/AudioOutput>
 #include <phonon/MediaObject>
@@ -356,7 +359,10 @@ QString TextContent::toHtml(const QString &/*imageName*/, const QString &/*cutte
 
 QString HtmlContent::toHtml(const QString &/*imageName*/, const QString &/*cuttedFullPath*/)
 {
-    return Tools::htmlToParagraph(html());
+    //return Tools::htmlToParagraph(html());
+    QTextDocument* simpleRichText = new QTextDocument();
+    simpleRichText->setHtml(html());
+    return Tools::textDocumentToMinimalHTML(simpleRichText);
 }
 
 QString ImageContent::toHtml(const QString &/*imageName*/, const QString &cuttedFullPath)
@@ -721,7 +727,11 @@ void TextContent::fontChanged()
 }
 void HtmlContent::fontChanged()
 {
-    setHtml(html());
+    QTextDocument* richDoc = m_graphicsTextItem.document();
+    //This check is important when applying style to a note which is not loaded yet. Example:
+    //Filter all -> open some basket for the first time -> close filter: if a note was tagged as TODO, then it would display no text
+    if (!richDoc->isEmpty())
+        setHtml(Tools::textDocumentToMinimalHTML(richDoc));
 }
 void ImageContent::fontChanged()
 {
@@ -976,7 +986,7 @@ bool TextContent::loadFromFile(bool lazyLoad)
     DEBUG_WIN << "Loading TextContent From " + basket()->folderName() + fileName();
 
     QString content;
-    bool success = basket()->loadFromFile(fullPath(), &content, /*isLocalEncoding=*/true);
+    bool success = basket()->loadFromFile(fullPath(), &content);
 
     if (success)
         setText(content, lazyLoad);
@@ -998,7 +1008,7 @@ bool TextContent::finishLazyLoad()
 
 bool TextContent::saveToFile()
 {
-    return basket()->saveToFile(fullPath(), text(), /*isLocalEncoding=*/true);
+    return basket()->saveToFile(fullPath(), text());
 }
 
 QString TextContent::linkAt(const QPointF &/*pos*/)
@@ -1075,7 +1085,7 @@ bool HtmlContent::loadFromFile(bool lazyLoad)
     DEBUG_WIN << "Loading HtmlContent From " + basket()->folderName() + fileName();
 
     QString content;
-    bool success = basket()->loadFromFile(fullPath(), &content, /*isLocalEncoding=*/true);
+    bool success = basket()->loadFromFile(fullPath(), &content);
 
     if (success)
         setHtml(content, lazyLoad);
@@ -1094,13 +1104,14 @@ bool HtmlContent::finishLazyLoad()
     m_graphicsTextItem.setFlags(QGraphicsItem::ItemIsSelectable|QGraphicsItem::ItemIsFocusable);
     m_graphicsTextItem.setTextInteractionFlags(Qt::TextEditorInteraction);
     
-    QString css = ".cross_reference { display: block; width: 100%; text-decoration: none; color: #336600; }"
+    /*QString css = ".cross_reference { display: block; width: 100%; text-decoration: none; color: #336600; }"
        "a:hover.cross_reference { text-decoration: underline; color: #ff8000; }";
-    m_graphicsTextItem.document()->setDefaultStyleSheet(css);
+    m_graphicsTextItem.document()->setDefaultStyleSheet(css);*/
     QString convert = Tools::tagURLs(m_html);
     if(note()->allowCrossReferences())
         convert = Tools::tagCrossReferences(convert);
     m_graphicsTextItem.setHtml(convert);
+    m_graphicsTextItem.setDefaultTextColor(note()->textColor());
     m_graphicsTextItem.setFont(note()->font());
     m_graphicsTextItem.setTextWidth(1); // We put a width of 1 pixel, so usedWidth() is egual to the minimum width
     int minWidth = m_graphicsTextItem.document()->idealWidth();
@@ -1112,7 +1123,7 @@ bool HtmlContent::finishLazyLoad()
 
 bool HtmlContent::saveToFile()
 {
-    return basket()->saveToFile(fullPath(), html(), /*isLocalEncoding=*/true);
+    return basket()->saveToFile(fullPath(), html());
 }
 
 QString HtmlContent::linkAt(const QPointF &pos)
@@ -1137,10 +1148,12 @@ QString HtmlContent::messageWhenOpening(OpenMessage where)
 void HtmlContent::setHtml(const QString &html, bool lazyLoad)
 {
     m_html = html;
+    /* The code was commented, so now non-Latin text is stored directly in Unicode.
+     * If testing doesn't show any bugs, this block should be deleted
     QRegExp rx("([^\\x00-\\x7f])");
     while (m_html.contains(rx)) {
         m_html.replace( rx.cap().unicode()[0], QString("&#%1;").arg(rx.cap().unicode()[0].unicode()) );
-    }
+    }*/
     m_textEquivalent = toText(""); //OPTIM_FILTER
     if (!lazyLoad)
         finishLazyLoad();
@@ -1653,7 +1666,7 @@ QString SoundContent::messageWhenOpening(OpenMessage where)
  */
 
 LinkContent::LinkContent(Note *parent, const KUrl &url, const QString &title, const QString &icon, bool autoTitle, bool autoIcon)
-        : NoteContent(parent), m_linkDisplayItem(parent), m_access_manager(0), m_httpBuff(0), m_previewJob(0)
+    : NoteContent(parent), m_linkDisplayItem(parent), m_access_manager(0), m_acceptingData(false), m_previewJob(0)
 {
     setLink(url, title, icon, autoTitle, autoIcon);
     if(parent)
@@ -1666,7 +1679,6 @@ LinkContent::~LinkContent()
 {
     if(note()) note()->removeFromGroup(&m_linkDisplayItem);
     delete m_access_manager;
-    delete m_httpBuff;
 }
 
 qreal LinkContent::setWidthAndGetHeight(qreal width)
@@ -1790,55 +1802,31 @@ void LinkContent::removePreview(const KFileItem& ki)
 // QHttp slots for getting link title
 void LinkContent::httpReadyRead()
 {
+    if (!m_acceptingData)
+        return;
+
     //Check for availability
-    unsigned long bytesAvailable = m_reply->bytesAvailable();
+    qint64 bytesAvailable = m_reply->bytesAvailable();
     if (bytesAvailable <= 0)
         return;
 
-    char* buf = new char[bytesAvailable+1];
+    QByteArray buf = m_reply->read(bytesAvailable);
+    m_httpBuff.append(buf);
 
-    long bytes_read = m_reply->read(buf, bytesAvailable);
-    if (bytes_read > 0) {
-
-        // m_httpBuff will keep data if title is not found in initial read
-        if (m_httpBuff == 0) {
-            m_httpBuff = new QString(buf);
-        } else {
-            (*m_httpBuff) += buf;
-        }
-
-        // todo: this should probably strip odd html tags like &nbsp; etc
-        QRegExp reg("<title>[\\s]*(&nbsp;)?([^<]+)[\\s]*</title>", Qt::CaseInsensitive);
-        reg.setMinimal(true);
-        int offset = 0;
-        //kDebug() << *m_httpBuff << " bytes: " << bytes_read;
-
-        //FIXME: that check doesn't seem to make any sense
-        if ((offset = reg.indexIn(*m_httpBuff)) >= 0) {
-            m_title = reg.cap(2);
-            m_autoTitle = false;
-            setEdited();
-
-            // refresh the title
-            setLink(url(), title(), icon(), autoTitle(), autoIcon());
-
-            // stop the http connection
-            m_reply->abort();
-
-            delete m_httpBuff;
-            m_httpBuff = 0;
-        }
-        // Stop at 10k bytes
-        else if (m_httpBuff->length() > 10000)   {
-            m_reply->abort();
-            delete m_httpBuff;
-            m_httpBuff = 0;
-        }
+    // Stop at 10k bytes
+    if (m_httpBuff.length() > 10000)   {
+        m_acceptingData = false;
+        m_reply->abort();
+        endFetchingLinkTitle();
     }
-    delete buf;
 }
 
 void LinkContent::httpDone(QNetworkReply* reply) {
+    if (m_acceptingData) {
+        m_acceptingData = false;
+        endFetchingLinkTitle();
+    }
+
     //If all done, close and delete the reply.
     reply->deleteLater();
 }
@@ -1866,6 +1854,7 @@ void LinkContent::startFetchingLinkTitle()
 
         //Issue request
         m_reply = m_access_manager->get(QNetworkRequest(newUrl));
+        m_acceptingData = true;
         connect(m_reply, SIGNAL(readyRead()), this, SLOT(httpReadyRead()));
     }
 }
@@ -1885,6 +1874,12 @@ void LinkContent::startFetchingUrlPreview()
         connect(m_previewJob, SIGNAL(gotPreview(const KFileItem&, const QPixmap&)), this, SLOT(newPreview(const KFileItem&, const QPixmap&)));
         connect(m_previewJob, SIGNAL(failed(const KFileItem&)),                     this, SLOT(removePreview(const KFileItem&)));
     }
+}
+
+void LinkContent::endFetchingLinkTitle()
+{
+    decodeHtmlTitle();
+    m_httpBuff.clear();
 }
 
 void LinkContent::exportToHTML(HTMLExporter *exporter, int indent)
@@ -2673,3 +2668,34 @@ void NoteFactory__loadNode(const QDomElement &content, const QString &lowerTypeN
     else if (lowerTypeName == "unknown")   new UnknownContent(parent, content.text());
 }
 
+
+
+void LinkContent::decodeHtmlTitle()
+{
+    KEncodingProber prober;
+    prober.feed(m_httpBuff);
+
+    // Fallback scheme: KEncodingProber - QTextCodec::codecForHtml - UTF-8
+    QTextCodec* textCodec;
+    if (prober.confidence() > 0.5)
+        textCodec = QTextCodec::codecForName(prober.encoding()); else
+        textCodec = QTextCodec::codecForHtml(m_httpBuff, QTextCodec::codecForName("utf-8"));
+
+    QTextCodec::setCodecForCStrings(textCodec);
+    QString httpBuff = QString::fromAscii(m_httpBuff.data(), m_httpBuff.size()); //use fromCString() for Qt5
+    QTextCodec::setCodecForCStrings(0);
+
+    // todo: this should probably strip odd html tags like &nbsp; etc
+    QRegExp reg("<title>[\\s]*(&nbsp;)?([^<]+)[\\s]*</title>", Qt::CaseInsensitive);
+    reg.setMinimal(true);
+    //kDebug() << *m_httpBuff << " bytes: " << bytes_read;
+
+    if (reg.indexIn(httpBuff) >= 0) {
+        m_title = reg.cap(2);
+        m_autoTitle = false;
+        setEdited();
+
+        // refresh the title
+        setLink(url(), title(), icon(), autoTitle(), autoIcon());
+    }
+}

@@ -341,7 +341,7 @@ void Note::setSelected(bool selected)
         return;
 
     if (!selected && basket()->editedNote() == this) {
-        basket()->closeEditor();
+        //basket()->closeEditor();
 	return; // To avoid a bug that would count 2 less selected notes instead of 1 less! Because m_selected is modified only below.
     }
 
@@ -395,11 +395,9 @@ void Note::selectIn(const QRectF &rect, bool invertSelection, bool unselectOther
 
     bool toSelect = intersects || (!unselectOthers && isSelected());
     if (invertSelection) {
-        if (m_wasInLastSelectionRect == intersects)
-            toSelect = isSelected();
-        else if (intersects xor m_wasInLastSelectionRect)
-            toSelect = !isSelected();// xor intersects;
+        toSelect = (m_wasInLastSelectionRect == intersects) ? isSelected() : !isSelected();
     }
+
     setSelected(toSelect);
     m_wasInLastSelectionRect = intersects;
 
@@ -764,7 +762,7 @@ Note::Zone Note::zoneAt(const QPointF &pos, bool toAdd)
     if (!linkAt(pos).isEmpty())
         return Link;
 
-    qreal customZone = content()->zoneAt(pos - QPointF(contentX(), NOTE_MARGIN));
+    int customZone = content()->zoneAt(pos - QPointF(contentX(), NOTE_MARGIN));
     if (customZone)
         return (Note::Zone)customZone;
 
@@ -1292,6 +1290,8 @@ void drawGradient(QPainter *p, const QColor &colorTop, const QColor & colorBotto
                   qreal x, qreal y, qreal w, qreal h,
                   bool sunken, bool horz, bool flat)   /*const*/
 {
+    w++; //proper width in kde4 version
+
     QColor highlight(colorBottom);
     QColor subh1(colorTop);
     QColor subh2(colorTop);
@@ -1987,11 +1987,8 @@ void Note::draw(QPainter *painter, const QRectF &/*clipRect*/)
         QStyleOptionFocusRect opt;
         opt.initFrom(m_basket->graphicsView());
         opt.rect = focusRect;
-        //Temporary change to see the focus rectangle 
-        painter2.setPen(Qt::red);
-        painter2.drawRect(focusRect);
-        //kapp->style()->drawPrimitive(QStyle::PE_FrameFocusRect, &opt,
-        //                             &painter2);
+        kapp->style()->drawPrimitive(QStyle::PE_FrameFocusRect, &opt,
+                                     &painter2);
     }
 
     // Draw on screen:
@@ -2786,7 +2783,7 @@ bool Note::convertTexts()
     if (content() && content()->lowerTypeName() == "text") {
         QString text = ((TextContent*)content())->text();
         QString html = "<html><head><meta http-equiv=\"content-type\" content=\"text/html; charset=utf-8\"><meta name=\"qrichtext\" content=\"1\" /></head><body>" + Tools::textToHTMLWithoutP(text) + "</body></html>";
-        basket()->saveToFile(fullPath(), html, /*isLocalEncoding=*/true);
+        basket()->saveToFile(fullPath(), html);
         setContent(new HtmlContent(this, content()->fileName()));
         convertedNotes = true;
     }

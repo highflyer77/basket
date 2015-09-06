@@ -32,7 +32,9 @@
 #include <QtGui/QImage>
 #include <QtGui/QFont>
 #include <QtGui/QFontInfo>
-#include <QtGui/QTextDocument>  //For Qt::convertFromPlainText and Qt::WhiteSpaceNormal.
+
+#include <QtGui/QTextDocument>
+#include <QTextBlock>
 
 #include <KDE/KDebug>
 #include <KDE/KIO/CopyJob>      //For KIO::trash
@@ -79,6 +81,28 @@ void StopWatch::check(int id)
     kDebug() << k_funcinfo << "Timer_" << id << ": " << time << " s    [" << counts[id] << " times, total: " << totals[id] << " s, average: " << totals[id] / counts[id] << " s]" <<  endl;
 }
 
+
+/** @namespace HTM
+ *  @brief HTML tags constants */
+namespace HTM {
+static const char* BR = "<br/>";
+static const char* PAR = "<p>";
+static const char* _PAR = "</p>";
+
+//Styles
+static const char* FONT_FAMILY = "font-family: %1; ";
+static const char* FONT_STYLE = "font-style: %1; ";
+static const char* TEXT_DECORATION = "text-decoration: %1; ";
+
+static const char* ITALIC = "italic";
+static const char* UNDERLINE = "underline";
+static const char* LINE_THROUGH = "line-through";
+
+//static const char* FONT_WEIGHT = "font-weight: %1; ";
+static const char* FONT_SIZE = "font-size: %1pt; ";
+static const char* COLOR = "color: %1; ";
+}
+
 QString Tools::textToHTML(const QString &text)
 {
     if (text.isEmpty())
@@ -120,7 +144,7 @@ QString Tools::htmlToParagraph(const QString &html)
     if (startedBySpan)
         result += "</span>";
 
-    return result.replace("</p>", "<br><br>").replace("<p>", "");
+    return result;
 }
 
 // The following is adapted from KStringHanlder::tagURLs
@@ -326,6 +350,7 @@ QString Tools::htmlToText(const QString &html)
     text.replace("</td>", "  ");
     text.replace("<br>",  "\n");
     text.replace("<br />", "\n");
+    text.replace("</p>", "\n");
     // FIXME: Format <table> tags better, if possible
     // TODO: Replace &eacute; and co. by theire equivalent!
 
@@ -389,7 +414,116 @@ QString Tools::htmlToText(const QString &html)
     text.replace("&nbsp;", " ");
     text.replace("&amp;",  "&"); // CONVERT IN LAST!!
 
+    // HtmlContent produces "\n" for empty note
+    if (text == "\n")
+        text = "";
+
     return text;
+}
+
+QString Tools::textDocumentToMinimalHTML(QTextDocument* document) {
+
+    QString result =
+            "<!DOCTYPE HTML PUBLIC \"-//W3C//DTD HTML 4.01//EN\" \"http://www.w3.org/TR/html4/strict.dtd\">\n"
+            "<html><head><meta name=\"qrichtext\" content=\"1\" /><meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\" /><style type=\"text/css\">\n"
+            "p, li { white-space: pre-wrap; margin: 0px; }\n"
+            "</style></head><body>\n";
+    QFont defaultFont;
+    int fragCount, blockCount = 0;
+    bool leadingBrNeeded = false;
+
+    for (QTextBlock blockIt = document->begin(); blockIt != document->end(); blockIt = blockIt.next(), ++blockCount) {
+
+        result += HTM::PAR;
+
+        // Prepare to detect empty blocks
+        fragCount = 0;
+
+        for (QTextBlock::iterator subIt = blockIt.begin(); !(subIt.atEnd()); ++subIt, ++fragCount) {
+            QTextFragment currentFragment = subIt.fragment();
+
+            if (currentFragment.isValid()) {
+
+                // Dealing with need to add leading linebreak (see later for
+                // further notes)
+                if (leadingBrNeeded)
+                {
+                    result += HTM::BR;
+                    leadingBrNeeded = false;
+                }
+
+                QTextCharFormat charFmt = currentFragment.charFormat();
+                const QColor& textColor = charFmt.foreground().color();
+                bool isTextBlack = (textColor == QColor() || textColor == QColor(Qt::black));
+
+                if (charFmt.font() == defaultFont && isTextBlack) {
+                    result += Qt::escape(currentFragment.text());
+                    continue;
+                }
+
+                //If we use charFmt.fontWeight, setting a tag overrides it and all characters become non-bold.
+                //So we use <b> </b> instead
+                bool bold = (charFmt.fontWeight() >= QFont::Bold);
+                if (bold)
+                    result += "<b>";
+
+                //Compose style string (font and color)
+                result += "<span style=\"";
+
+                if (charFmt.fontFamily() != defaultFont.family() && !charFmt.fontFamily().isEmpty())
+                    result += QString(HTM::FONT_FAMILY).arg(charFmt.fontFamily());
+
+
+                if (charFmt.fontItalic())
+                    result += QString(HTM::FONT_STYLE).arg(HTM::ITALIC);
+                if (charFmt.fontUnderline())
+                    result += QString(HTM::TEXT_DECORATION).arg(HTM::UNDERLINE);
+                if (charFmt.fontStrikeOut())
+                    result += QString(HTM::TEXT_DECORATION).arg(HTM::LINE_THROUGH);
+
+
+                /*if (charFmt.fontWeight() != defaultFont.weight()) {
+                    QFont::Weight weight = (charFmt.fontWeight() >= QFont::Bold) ? QFont::Bold : QFont::Normal;
+                    result += QString(HTM::FONT_WEIGHT).arg(weight);
+                }*/
+
+                if (charFmt.fontPointSize() != defaultFont.pointSize() && charFmt.fontPointSize() != 0)
+                    result += QString(HTM::FONT_SIZE).arg(charFmt.fontPointSize());
+
+                if (!isTextBlack)
+                    result += QString(HTM::COLOR).arg(textColor.name());
+
+
+                result += "\">" + Qt::escape(currentFragment.text()) + "</span>";
+
+                if (bold)
+                    result += "</b>";
+            }
+        }
+
+        // Detecting empty blocks (Qt4 fails to generate a fragment from an empty line)
+        // Inserting a linebreak directly here seems to cause the renderer to render
+        // two breaks, so have to append it to the contents of the previous paragraph...
+        if (!fragCount)
+        {
+            // If the first fragment is an empty fragment, the linebreak must be
+            // added to the next fragment otherwise you get the above double breaks
+            if(!blockCount) leadingBrNeeded = true;
+
+            // Deal with the problem only when the last block is not affected,
+            // otherwise you get double breaks again... Blocks counted from 0
+            else if (blockCount != (document->blockCount() - 1))
+            {
+                result.chop(7);
+                result = result + HTM::BR + HTM::_PAR + HTM::PAR;
+            }
+        }
+
+        result += HTM::_PAR;
+    }
+
+    result += "</body></html>";
+    return result;
 }
 
 QString Tools::cssFontDefinition(const QFont &font, bool onlyFontFamily)

@@ -52,6 +52,7 @@
 #include <QtGui/QClipboard>
 #include <QtGui/QInputDialog>
 #include <QtGui/QGraphicsProxyWidget>
+#include <QtGui/QScrollBar>
 #include <QtXml/QDomDocument>
 
 #include <KDE/KTextEdit>
@@ -95,6 +96,7 @@
 #include "debugwindow.h"
 #include "exporterdialog.h"
 #include "focusedwidgets.h"
+#include "gitwrapper.h"
 
 #include "config.h"
 
@@ -575,7 +577,7 @@ void BasketScene::loadNotes(const QDomElement &notes, Note *parent)
                 }
             }
         }
-//      kapp->processEvents();
+      kapp->processEvents();
     }
 }
 
@@ -941,7 +943,16 @@ bool BasketScene::save()
     }
 
     Global::bnpView->setUnsavedStatus(false);
+
+
+    m_commitdelay.start(10000); //delay is 10 seconds
+
     return true;
+}
+
+void BasketScene::commitEdit()
+{
+    GitWrapper::commitBasket(this);
 }
 
 void BasketScene::aboutToBeActivated()
@@ -1251,6 +1262,10 @@ BasketScene::BasketScene(QWidget *parent, const QString &folderName)
     m_gpg = new KGpgMe();
 #endif
     m_locked = isFileEncrypted();
+
+    //setup the delayed commit timer
+    m_commitdelay.setSingleShot(true);
+    connect(&m_commitdelay, SIGNAL(timeout()), this, SLOT(commitEdit()));
 }
 
 void BasketScene::enterEvent(QEvent *)
@@ -1319,7 +1334,8 @@ void BasketScene::mousePressEvent(QGraphicsSceneMouseEvent *event)
     if( m_editor && !shiftPressed && !controlPressed )
     {
 	//if the mouse is over the editor
-	QGraphicsWidget *widget = dynamic_cast<QGraphicsWidget*>(m_view->itemAt(event->scenePos().toPoint()));
+    QPoint view_shift(m_view->horizontalScrollBar()->value(), m_view->verticalScrollBar()->value());
+    QGraphicsWidget *widget = dynamic_cast<QGraphicsWidget*>(m_view->itemAt((event->scenePos() - view_shift).toPoint()));
 	if(widget && m_editor->graphicsWidget() == widget)
 	{
 	    if(event->button() == Qt::LeftButton)
@@ -1333,12 +1349,17 @@ void BasketScene::mousePressEvent(QGraphicsSceneMouseEvent *event)
 	      m_editor->paste(event->scenePos());
 	      return;
 	    }
-	}
+    }
     }
 		
     // Figure out what is the clicked note and zone:
     Note *clicked = noteAt(event->scenePos());
+    if( m_editor && (!clicked || ( clicked && !(editedNote() == clicked) )) )
+    {
+        closeEditor();
+    }
     Note::Zone zone = (clicked ? clicked->zoneAt(event->scenePos() - QPointF(clicked->x(), clicked->y())) : Note::None);
+
     // Popup Tags menu:
     if (zone == Note::TagsArrow && !controlPressed && !shiftPressed && event->button() != Qt::MidButton) {
         if (!clicked->allSelected())
@@ -1381,7 +1402,7 @@ void BasketScene::mousePressEvent(QGraphicsSceneMouseEvent *event)
 
         // Select note(s):
         if (zone == Note::Handle || zone == Note::Group || (zone == Note::GroupExpander && (controlPressed || shiftPressed))) {
-	    closeEditor();
+        //closeEditor();
             Note *end = clicked;
             if (clicked->isGroup() && shiftPressed) {
                 if (clicked->containsNote(m_startOfShiftSelectionNote)) {
@@ -1489,7 +1510,7 @@ void BasketScene::mousePressEvent(QGraphicsSceneMouseEvent *event)
             unselectAllBut(clicked);
         setFocusedNote(clicked); /// /// ///
         if (editedNote() == clicked) {
-            closeEditor();
+            closeEditor(false);
             clicked->setSelected(true);
         }
         m_startOfShiftSelectionNote = (clicked->isGroup() ? clicked->firstRealChild() : clicked);
@@ -1509,7 +1530,7 @@ void BasketScene::mousePressEvent(QGraphicsSceneMouseEvent *event)
             m_clickedToInsert = clicked;
             m_zoneToInsert    = zone;
             m_posToInsert     = event->scenePos();
-            closeEditor();
+            //closeEditor();
             removeInserter();                     // If clicked at an insertion line and the new note shows a dialog for editing,
             NoteType::Id type = (NoteType::Id)0;  //  hide that inserter before the note edition instead of after the dialog is closed
             switch (Settings::middleAction()) {
@@ -1531,7 +1552,7 @@ void BasketScene::mousePressEvent(QGraphicsSceneMouseEvent *event)
         } else {
             if (clicked)
                 zone = clicked->zoneAt(event->scenePos() - QPoint(clicked->x(), clicked->y()), true);
-            closeEditor();
+            //closeEditor();
             clickedToInsert(event, clicked, zone);
             save();
         }
@@ -1755,8 +1776,10 @@ void BasketScene::dragEnterEvent(QGraphicsSceneDragDropEvent *event)
 {
     m_isDuringDrag = true;
     Global::bnpView->updateStatusBarHint();
-    if (NoteDrag::basketOf(event->mimeData()) == this)
+    if (NoteDrag::basketOf(event->mimeData()) == this) {
         m_draggedNotes = NoteDrag::notesOf(event);
+        NoteDrag::saveNoteSelectionToList(selectedNotes());
+    }
     event->accept();
 }
 
@@ -1799,6 +1822,7 @@ void BasketScene::dragLeaveEvent(QGraphicsSceneDragDropEvent *)
 //  resetInsertTo();
     m_isDuringDrag = false;
     m_draggedNotes.clear();
+    NoteDrag::selectedNotes.clear();
     m_noActionOnMouseRelease = true;
     emit resetStatusBarText();
     doHoverEffects();
@@ -1854,6 +1878,7 @@ void BasketScene::dropEvent(QGraphicsSceneDragDropEvent *event)
     }
 
     m_draggedNotes.clear();
+    NoteDrag::selectedNotes.clear();
 
     m_doNotCloseEditor = false;
     // When starting the drag, we saved where we were editing.
@@ -2746,27 +2771,15 @@ void BasketScene::drawInserter(QPainter &painter, qreal xPainter, qreal yPainter
     }
 }
 
-bool BasketScene::event(QEvent *event)
+void BasketScene::helpEvent(QGraphicsSceneHelpEvent* event)
 {
-    // Only take the help events
-    if (event->type() == QEvent::ToolTip) {
-        QHelpEvent *helpEvent = static_cast<QHelpEvent *>(event);
-        tooltipEvent(helpEvent);
-        return true;
-    } else
-	return QGraphicsScene::event(event);
-}
-
-void BasketScene::tooltipEvent(QHelpEvent *event)
-{
-    QPoint pos = event->globalPos();
     if (!m_loaded || !Settings::showNotesToolTip())
 	return;
 
     QString message;
     QRectF   rect;
 
-    QPointF contentPos = m_view->mapToScene(event->pos());
+    QPointF contentPos = event->scenePos();
     Note *note = noteAt(contentPos);
 
     if (!note && isFreeLayout()) {
@@ -2786,6 +2799,7 @@ void BasketScene::tooltipEvent(QHelpEvent *event)
 	  return;
 
         Note::Zone zone = note->zoneAt(contentPos - QPointF(note->x(), note->y()));
+
         switch (zone) {
         case Note::Resizer:       message = (note->isColumn() ?
                                                  i18n("Resize those columns") :
@@ -2858,7 +2872,7 @@ void BasketScene::tooltipEvent(QHelpEvent *event)
         rect.moveTop(rect.top()  + note->y());
     }
 
-    QToolTip::showText(pos, message, m_view, rect.toRect());
+    QToolTip::showText(event->screenPos(), message, m_view, rect.toRect());
 }
 
 Note* BasketScene::lastNote()
@@ -2918,10 +2932,10 @@ Note* BasketScene::noteAt(QPointF pos)
     while (note) {
         possibleNote = note->noteAt(pos);
         if (possibleNote) {
-	  if (draggedNotes().contains(possibleNote))
-	    return 0;
-	  else
-	    return possibleNote;
+            if (NoteDrag::selectedNotes.contains(possibleNote) || draggedNotes().contains(possibleNote))
+                return 0;
+            else
+                return possibleNote;
         }
         note = note->next();
     }
@@ -2942,6 +2956,7 @@ Note* BasketScene::noteAt(QPointF pos)
 
 BasketScene::~BasketScene()
 {
+    m_commitdelay.stop();	//we don't know how long deleteNotes() last so we want to make extra sure that nobody will commit in between
     if (m_decryptBox)
         delete m_decryptBox;
 #ifdef HAVE_LIBGPGME
@@ -3353,10 +3368,6 @@ void BasketScene::popupEmblemMenu(Note *note, int emblemNumber)
         act->setData(4);
         menu.addAction(act);
     }
-    if (sequenceOnDelete && tag->countStates() != 1) {
-        // Not sure if this is equivalent to menu.setAccel(sequence, 1);
-        menu.actionAt(QPoint(0, 1))->setShortcut(sequence);
-    }
 
     connect(&menu, SIGNAL(triggered(QAction *)), this, SLOT(toggledStateInMenu(QAction *)));
     connect(&menu, SIGNAL(aboutToHide()),  this, SLOT(unlockHovering()));
@@ -3749,7 +3760,7 @@ void BasketScene::closeEditorDelayed()
     QTimer::singleShot(0, this, SLOT(closeEditor()));
 }
 
-bool BasketScene::closeEditor()
+bool BasketScene::closeEditor(bool deleteEmptyNote /* =true*/)
 {
     if (!isDuringEdit())
         return true;
@@ -3786,7 +3797,7 @@ bool BasketScene::closeEditor()
     m_inactivityAutoSaveTimer.stop();
 
     // Delete the note if it is now empty:
-    if (isEmpty) {
+    if (isEmpty && deleteEmptyNote) {
         focusANonSelectedNoteAboveOrThenBelow();
         note->setSelected(true);
         note->deleteSelectedNotes();
@@ -3984,6 +3995,10 @@ void BasketScene::noteEdit(Note *note, bool justAdded, const QPointF &clickedPoi
         filterAgain();
         unselectAll();
     }
+    // Must set focus to the editor, otherwise edit cursor is not seen and precomposed characters cannot be entered
+    if (m_editor != NULL)
+        m_editor->textEdit()->setFocus();
+
     Global::bnpView->m_actEditNote->setEnabled(false);
 }
 
@@ -4691,11 +4706,6 @@ Note* BasketScene::lastNoteShownInStack()
     return last;
 }
 
-inline int abs(int n)
-{
-    return (n < 0 ? -n : n);
-}
-
 Note* BasketScene::noteOn(NoteOn side)
 {
     Note *bestNote = 0;
@@ -5142,15 +5152,12 @@ bool BasketScene::saveAgain()
     return result;
 }
 
-bool BasketScene::loadFromFile(const QString &fullPath, QString *string, bool isLocalEncoding)
+bool BasketScene::loadFromFile(const QString &fullPath, QString *string)
 {
     QByteArray array;
 
     if (loadFromFile(fullPath, &array)) {
-        if (isLocalEncoding)
-            *string = QString::fromLocal8Bit(array.data(), array.size());
-        else
-            *string = QString::fromUtf8(array.data(), array.size());
+        *string = QString::fromUtf8(array.data(), array.size());
         return true;
     } else
         return false;
@@ -5215,19 +5222,11 @@ bool BasketScene::loadFromFile(const QString &fullPath, QByteArray *array)
         return false;
 }
 
-bool BasketScene::saveToFile(const QString& fullPath, const QString& string, bool isLocalEncoding)
+bool BasketScene::saveToFile(const QString& fullPath, const QString& string)
 {
-    QByteArray bytes = (isLocalEncoding ? string.toLocal8Bit() : string.toUtf8());
-    return saveToFile(fullPath, bytes, bytes.length());
-}
+    QByteArray array = string.toUtf8();
+    ulong length = array.size();
 
-bool BasketScene::saveToFile(const QString& fullPath, const QByteArray& array)
-{
-    return saveToFile(fullPath, array, array.size());
-}
-
-bool BasketScene::saveToFile(const QString& fullPath, const QByteArray& array, unsigned long length)
-{
     bool success = true;
     QByteArray tmp;
 
@@ -5322,15 +5321,10 @@ bool BasketScene::saveToFile(const QString& fullPath, const QByteArray& array, u
     return true; // Guess we can't really return a fail
 }
 
-/*static*/ bool BasketScene::safelySaveToFile(const QString& fullPath, const QString& string, bool isLocalEncoding)
+/*static*/ bool BasketScene::safelySaveToFile(const QString& fullPath, const QString& string)
 {
-    QByteArray bytes = (isLocalEncoding ? string.toLocal8Bit() : string.toUtf8());
-    return safelySaveToFile(fullPath, bytes, bytes.length() - 1);
-}
-
-/*static*/ bool BasketScene::safelySaveToFile(const QString& fullPath, const QByteArray& array)
-{
-    return safelySaveToFile(fullPath, array, array.size());
+    QByteArray bytes = string.toUtf8();
+    return safelySaveToFile(fullPath, bytes, bytes.length());
 }
 
 void BasketScene::lock()

@@ -63,6 +63,7 @@
 #include <cstdlib>
 #include <unistd.h> // usleep
 
+#include "gitwrapper.h"
 #include "basketscene.h"
 #include "decoratedbasket.h"
 #include "tools.h"
@@ -89,8 +90,12 @@
 #include "backup.h"
 #include "notefactory.h"
 #include "history.h"
+#include "icon_names.h"
 
-#include "bnpviewadaptor.h"
+#include <qdbusconnection.h>
+#include <QResource>
+
+//#include "bnpviewadaptor.h"
 
 /** class BNPView: */
 
@@ -113,7 +118,7 @@ BNPView::BNPView(QWidget *parent, const char *name, KXMLGUIClient *aGUIClient,
         , m_hideTimer(0)
 {
 
-    new BNPViewAdaptor(this);
+    //new BNPViewAdaptor(this);
     QDBusConnection dbus = QDBusConnection::sessionBus();
     dbus.registerObject("/BNPView", this);
 
@@ -181,7 +186,7 @@ void BNPView::lateInit()
         }
     }
 #else
-    #warning Proper fix for the systray problem
+    #pragma message ("Proper fix for the systray problem")
 #endif
 
 
@@ -215,6 +220,8 @@ void BNPView::lateInit()
         if (topLevelItemCount() <= 0) {
             // Create first basket:
             BasketFactory::newBasket(/*icon=*/"", /*name=*/i18n("General"), /*backgroundImage=*/"", /*backgroundColor=*/QColor(), /*textColor=*/QColor(), /*templateName=*/"1column", /*createIn=*/0);
+            GitWrapper::commitBasket(currentBasket());
+            GitWrapper::commitTagsXml();
         }
     }
 
@@ -553,7 +560,7 @@ void BNPView::setupActions()
 
     a = ac->addAction("basket_import_tomboy", this, SLOT(importTomboy()));
     a->setText(i18n("&Tomboy"));
-    a->setIcon(KIcon("tintin"));
+    a->setIcon(KIcon(IconNames::TOMBOY));
     a->setShortcut(0);
 
     a = ac->addAction("basket_import_jreepad_file", this, SLOT(importJreepadFile()));
@@ -693,38 +700,38 @@ void BNPView::setupActions()
 
     a = ac->addAction("insert_link");
     a->setText(i18n("&Link"));
-    a->setIcon(KIcon("link"));
+    a->setIcon(KIcon(IconNames::LINK));
     a->setShortcut(KShortcut("Ctrl+Y"));
     m_actInsertLink = a;
 
     a = ac->addAction("insert_cross_reference");
     a->setText(i18n("Cross &Reference"));
-    a->setIcon(KIcon("link"));
+    a->setIcon(KIcon(IconNames::CROSS_REF));
     m_actInsertCrossReference = a;
 
     a = ac->addAction("insert_image");
     a->setText(i18n("&Image"));
-    a->setIcon(KIcon("image-png"));
+    a->setIcon(KIcon(IconNames::IMAGE));
     m_actInsertImage = a;
 
     a = ac->addAction("insert_color");
     a->setText(i18n("&Color"));
-    a->setIcon(KIcon("colorset"));
+    a->setIcon(KIcon(IconNames::COLOR));
     m_actInsertColor = a;
 
     a = ac->addAction("insert_launcher");
     a->setText(i18n("L&auncher"));
-    a->setIcon(KIcon("launch"));
+    a->setIcon(KIcon(IconNames::LAUNCH));
     m_actInsertLauncher = a;
 
     a = ac->addAction("insert_kmenu");
     a->setText(i18n("Import Launcher from &KDE Menu..."));
-    a->setIcon(KIcon("kmenu"));
+    a->setIcon(KIcon(IconNames::KMENU));
     m_actImportKMenu = a;
 
     a = ac->addAction("insert_icon");
     a->setText(i18n("Im&port Icon..."));
-    a->setIcon(KIcon("icons"));
+    a->setIcon(KIcon(IconNames::ICONS));
     m_actImportIcon = a;
 
     a = ac->addAction("insert_from_file");
@@ -980,6 +987,8 @@ void BNPView::slotContextMenu(const QPoint &pos)
     menu->exec(m_tree->mapToGlobal(pos));
 }
 
+/* this happens everytime we switch the basket (but not if we tell the user we save the stuff
+ */
 void BNPView::save()
 {
     DEBUG_WIN << "Basket Tree: Saving...";
@@ -994,40 +1003,23 @@ void BNPView::save()
 
     // Write to Disk:
     BasketScene::safelySaveToFile(Global::basketsFolder() + "baskets.xml", "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n" + document.toString());
-//  QFile file(Global::basketsFolder() + "baskets.xml");
-//  if (file.open(QIODevice::WriteOnly)) {
-//      QTextStream stream(&file);
-//      stream.setEncoding(QTextStream::UnicodeUTF8);
-//      QString xml = document.toString();
-//      stream << "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>\n";
-//      stream << xml;
-//      file.close();
-//  }
+
+    GitWrapper::commitBasketView();
 }
 
 void BNPView::save(QTreeWidget *listView, QTreeWidgetItem* item, QDomDocument &document, QDomElement &parentElement)
 {
     if (item == 0) {
+        if (listView == NULL) {
+            //This should not happen: we call either save(listView, 0) or save(0, item)
+            DEBUG_WIN << "BNPView::save error: listView=NULL and item=NULL";
+            return;
+        }
+
         // For each basket:
         for (int i = 0; i < listView->topLevelItemCount(); i++) {
             item = listView->topLevelItem(i);
-            BasketScene* basket = ((BasketListViewItem *)item)->basket();
-
-            QDomElement basketElement = document.createElement("basket");
-            parentElement.appendChild(basketElement);
-
-            // Save Attributes:
-            basketElement.setAttribute("folderName", basket->folderName());
-            if (item->childCount() >= 0) // If it can be expanded/folded:
-                basketElement.setAttribute("folded", XMLWork::trueOrFalse(!item->isExpanded()));
-
-            if (((BasketListViewItem*)item)->isCurrentBasket())
-                basketElement.setAttribute("lastOpened", "true");
-
-            // Save Properties:
-            QDomElement properties = document.createElement("properties");
-            basketElement.appendChild(properties);
-            basket->saveProperties(document, properties);
+            QDomElement basketElement = createBasketElement(item, document, parentElement);
 
             // Save Child Basket:
             if (item->childCount() >= 0) {
@@ -1036,23 +1028,7 @@ void BNPView::save(QTreeWidget *listView, QTreeWidgetItem* item, QDomDocument &d
             }
         }
     } else {
-        BasketScene* basket = ((BasketListViewItem *)item)->basket();
-
-        QDomElement basketElement = document.createElement("basket");
-        parentElement.appendChild(basketElement);
-
-        // Save Attributes:
-        basketElement.setAttribute("folderName", basket->folderName());
-        if (item->childCount() >= 0) // If it can be expanded/folded:
-            basketElement.setAttribute("folded", XMLWork::trueOrFalse(!item->isExpanded()));
-
-        if (((BasketListViewItem*)item)->isCurrentBasket())
-            basketElement.setAttribute("lastOpened", "true");
-
-        // Save Properties:
-        QDomElement properties = document.createElement("properties");
-        basketElement.appendChild(properties);
-        basket->saveProperties(document, properties);
+        QDomElement basketElement = createBasketElement(item, document, parentElement);
 
         // Save Child Basket:
         if (item->childCount() >= 0) {
@@ -1062,29 +1038,36 @@ void BNPView::save(QTreeWidget *listView, QTreeWidgetItem* item, QDomDocument &d
     }
 }
 
-QDomElement BNPView::basketElement(QTreeWidgetItem *item, QDomDocument &document, QDomElement &parentElement)
+QDomElement BNPView::createBasketElement(QTreeWidgetItem *item, QDomDocument &document, QDomElement &parentElement)
 {
-    BasketScene *basket = ((BasketListViewItem*)item)->basket();
+    BasketScene* basket = ((BasketListViewItem*)item)->basket();
+
     QDomElement basketElement = document.createElement("basket");
     parentElement.appendChild(basketElement);
+
     // Save Attributes:
     basketElement.setAttribute("folderName", basket->folderName());
-    if (item->child(0)) // If it can be expanded/folded:
+    if (item->childCount() >= 0) // If it can be expanded/folded:
         basketElement.setAttribute("folded", XMLWork::trueOrFalse(!item->isExpanded()));
+
     if (((BasketListViewItem*)item)->isCurrentBasket())
         basketElement.setAttribute("lastOpened", "true");
+
     // Save Properties:
     QDomElement properties = document.createElement("properties");
     basketElement.appendChild(properties);
     basket->saveProperties(document, properties);
+
     return basketElement;
 }
 
 void BNPView::saveSubHierarchy(QTreeWidgetItem *item, QDomDocument &document, QDomElement &parentElement, bool recursive)
 {
-    QDomElement element = basketElement(item, document, parentElement);
-    if (recursive && item->child(0))
-        save(0, item->child(0), document, element);
+    QDomElement element = createBasketElement(item, document, parentElement); //create root <basket>
+    if (recursive) {
+        for (int i = 0; i < item->childCount(); i++)
+            save(0, item->child(i), document, element);
+    }
 }
 
 void BNPView::load()
@@ -1266,22 +1249,12 @@ bool BNPView::convertTexts()
 
 void BNPView::toggleFilterAllBaskets(bool doFilter)
 {
-    // Set the state:
-    m_actFilterAllBaskets->setChecked(doFilter);
-
     // If the filter isn't already showing, we make sure it does.
     if (doFilter)
         m_actShowFilter->setChecked(true);
 
     //currentBasket()->decoration()->filterBar()->setFilterAll(doFilter);
 
-//  BasketScene *current = currentBasket();
-    QTreeWidgetItemIterator it(m_tree);
-    while (*it) {
-        BasketListViewItem *item = ((BasketListViewItem*) * it);
-        item->basket()->decoration()->filterBar()->setFilterAll(doFilter);
-        ++it;
-    }
 
     if (doFilter)
         currentBasket()->decoration()->filterBar()->setEditFocus();
@@ -1352,6 +1325,7 @@ void BNPView::newFilter()
     }
 
 //  kapp->processEvents();
+    m_tree->viewport()->update(); // to see the "little numbers"
 
     alreadyEntered = false;
     shouldRestart  = false;
@@ -1473,7 +1447,6 @@ void BNPView::removeBasket(BasketScene *basket)
         BasketFactory::newBasket(/*icon=*/"", /*name=*/i18n("General"), /*backgroundImage=*/"", /*backgroundColor=*/QColor(), /*textColor=*/QColor(), /*templateName=*/"1column", /*createIn=*/0);
     else // No need to save two times if we add a basket
         save();
-
 }
 
 void BNPView::setTreePlacement(bool onLeft)
@@ -2245,7 +2218,7 @@ void BNPView::delBasket()
 
     doBasketDeletion(basket);
 
-//  rebuildBasketsMenu();
+    GitWrapper::commitDeleteBasket(basket);
 }
 
 void BNPView::doBasketDeletion(BasketScene *basket)
@@ -2364,6 +2337,8 @@ void BNPView::slotBasketChanged()
 {
     m_actFoldBasket->setEnabled(canFold());
     m_actExpandBasket->setEnabled(canExpand());
+    if (currentBasket()->decoration()->filterData().isFiltering)
+        currentBasket()->decoration()->filterBar()->show(); // especially important for Filter all
 	setFiltering(currentBasket() && currentBasket()->decoration()->filterData().isFiltering);
     this->canUndoRedoChanged();
 }
@@ -2395,6 +2370,8 @@ void BNPView::isLockedChanged()
 void BNPView::askNewBasket()
 {
     askNewBasket(0, 0);
+
+    GitWrapper::commitCreateBasket();
 }
 
 void BNPView::askNewBasket(BasketScene *parent, BasketScene *pickProperties)
